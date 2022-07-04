@@ -1,0 +1,187 @@
+import os
+import tensorflow as tf
+import numpy as np
+from tensorflow import keras
+import tensorflow_probability as tfp
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+
+feature = np.load('./Dataset_Final./VPPG_Input.npy').astype(np.float32)
+label = np.load('./Dataset_Final./VPPG_Label.npy').astype(np.float32)
+np.random.seed(np.size(feature, 0))
+np.random.shuffle(feature)
+np.random.seed(np.size(label, 0))
+np.random.shuffle(label)
+tf.random.set_seed(np.size(feature, 0))
+dataset = tf.data.Dataset.from_tensor_slices((feature, label))
+dataset_size = label.shape[0]
+batch_size = 64
+train_size = int(dataset_size * 0.8)
+
+
+## =====================Training and Testing Datasets===============================
+def get_train_and_test_splits(train_size, batch_size):
+    train_dataset = dataset.take(train_size).batch(batch_size)
+    test_dataset = dataset.skip(train_size).batch(batch_size)
+    return train_dataset, test_dataset
+
+
+## ========================Compile Network==================================
+def run_experiment(model, loss, train_dataset, test_dataset):
+    model.compile(
+        # optimizer=keras.optimizers.RMSprop(learning_rate=0.001),
+        optimizer=keras.optimizers.Adam(learning_rate=0.0001),
+        loss=loss,
+        metrics=[tf.keras.metrics.BinaryAccuracy(name='BinaryAccuracy'),
+                 # tf.keras.metrics.AUC(name='AUC'),
+                 # tf.keras.metrics.TruePositives(name='TruePositives'),
+                 # tf.keras.metrics.TrueNegatives(name='TrueNegatives'),
+                 # tf.keras.metrics.FalsePositives(name='FalsePositives'),
+                 # tf.keras.metrics.FalseNegatives(name='FalseNegatives'),
+        ],
+    )
+    print("Start training the model...")
+    model.fit(train_dataset, epochs=300, validation_data=test_dataset, verbose=1)
+    print("Model training finished.")
+    _, acc = model.evaluate(train_dataset, verbose=0)
+    print(f"Train ACCURACY: {round(acc, 3)}")
+    print("Evaluating model performance...")
+    _, acc = model.evaluate(test_dataset, verbose=0)
+    print(f"Test ACCURACY: {round(acc, 3)}")
+
+
+## =====================Experiment1: Baseline Model===============================
+def create_baseline_model():
+    inputs = tf.keras.Input(shape=600, name='Input')
+    x = tf.keras.layers.BatchNormalization()(inputs)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    outputs = tf.keras.layers.Dense(units=1, activation='sigmoid')(x)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    return model
+
+#--------------trainig
+train_dataset, test_dataset = get_train_and_test_splits(train_size, batch_size)
+loss = tf.keras.losses.BinaryCrossentropy()
+baseline_model = create_baseline_model()
+# run_experiment(baseline_model, loss, train_dataset, test_dataset)
+#--------------testing
+sample = 10
+examples, targets = list(test_dataset.unbatch().shuffle(batch_size * 10).batch(sample))[0]
+
+# predicted = baseline_model(examples).numpy()
+# for idx in range(sample):
+#     print(f"Predicted: {round(float(predicted[idx][0]), 1)} - Actual: {targets[idx]}")
+
+
+#===============================Experiment2: BNN===(Model Uncertainty)=================================
+def create_bnn_model():
+    inputs = tf.keras.Input(shape=600, name='Input')
+    x = tf.keras.layers.BatchNormalization()(inputs)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    outputs = tf.keras.layers.Dense(units=1, activation='sigmoid')(x)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    return model
+
+# train_sample_size = int(train_size * 0.3)
+# small_train_dataset = train_dataset.unbatch().take(train_sample_size).batch(batch_size)
+#
+# bnn_model_small = create_bnn_model()
+# run_experiment(bnn_model_small, loss, small_train_dataset, test_dataset)
+
+
+def compute_predictions(model, iterations=100):
+    predicted = []
+    for _ in range(iterations):
+        predicted.append(model(examples, training=True).numpy())
+    predicted = np.concatenate(predicted, axis=1)
+
+    prediction_mean = np.mean(predicted, axis=1).tolist()
+    prediction_min = np.min(predicted, axis=1).tolist()
+    prediction_max = np.max(predicted, axis=1).tolist()
+    prediction_std = np.std(predicted, axis=1).tolist()
+
+    for idx in range(sample):
+        print(
+            f"Predictions mean: {round(prediction_mean[idx], 2)}, "
+            f"min: {round(prediction_min[idx], 2)}, "
+            f"max: {round(prediction_max[idx], 2)}, "
+            f"std: {round(prediction_std[idx], 2)} - "
+            f"Actual: {targets[idx]}"
+        )
+
+
+bnn_model_full = create_bnn_model()
+run_experiment(bnn_model_full, loss, train_dataset, test_dataset)
+compute_predictions(bnn_model_full)
+
+
+#===============================Experiment3: BNN===(Data_Uncertainty)=================================
+def create_probablistic_bnn_model(train_size):
+    inputs = tf.keras.Input(shape=600, name='Input')
+    x = tf.keras.layers.BatchNormalization()(inputs)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    x = tf.keras.layers.Dense(units=300, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.5)(x)
+    distribution_params = tf.keras.layers.Dense(units=2)(x)
+    outputs = tfp.layers.IndependentBernoulli(2)(distribution_params)
+    model = keras.Model(inputs=inputs, outputs=outputs)
+    return model
+
+
+def negative_loglikelihood(targets, estimated_distribution):
+    return -estimated_distribution.log_prob(targets)
+
+
+prob_bnn_model = create_probablistic_bnn_model(train_size)
+run_experiment(prob_bnn_model, negative_loglikelihood, train_dataset, test_dataset)
+
+
+prediction_distribution = prob_bnn_model(examples)
+prediction_mean = prediction_distribution.mean().numpy().tolist()
+prediction_stdv = prediction_distribution.stddev().numpy()
+#
+# The 95% CI is computed as mean ± (1.96 * stdv)
+upper = (prediction_mean + (1.96 * prediction_stdv)).tolist()
+lower = (prediction_mean - (1.96 * prediction_stdv)).tolist()
+prediction_stdv = prediction_stdv.tolist()
+#
+for idx in range(sample):
+    print(
+        f"Prediction mean: {round(prediction_mean[idx][0], 2)}, "
+        f"stddev: {round(prediction_stdv[idx][0], 2)}, "
+        f"95% CI: [{round(upper[idx][0], 2)} - {round(lower[idx][0], 2)}]"
+        f" - Actual: {targets[idx]}"
+    )
+
+def compute_predictions_distribution(model, iterations=100):
+    predicted = []
+    for _ in range(iterations):
+        predicted.append(model(examples, training=True).mean().numpy())
+    predicted = np.concatenate(predicted, axis=1)
+
+    prediction_mean = np.mean(predicted, axis=1).tolist()
+    prediction_min = np.min(predicted, axis=1).tolist()
+    prediction_max = np.max(predicted, axis=1).tolist()
+    prediction_std = np.std(predicted, axis=1).tolist()
+
+    for idx in range(sample):
+        print(
+            f"Predictions mean: {round(prediction_mean[idx], 2)}, "
+            f"min: {round(prediction_min[idx], 2)}, "
+            f"max: {round(prediction_max[idx], 2)}, "
+            f"std: {round(prediction_std[idx], 2)} - "
+            f"Actual: {targets[idx]}"
+        )
+
+
+compute_predictions_distribution(prob_bnn_model)
